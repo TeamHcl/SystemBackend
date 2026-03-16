@@ -1,6 +1,8 @@
 package com.hcl.systembackend;
 
-import com.jayway.jsonpath.JsonPath;
+import com.hcl.systembackend.dto.DelegatedAdminProfile;
+import com.hcl.systembackend.dto.SigninRequest;
+import com.hcl.systembackend.dto.SignupRequest;
 import com.hcl.systembackend.entity.Account;
 import com.hcl.systembackend.entity.Customer;
 import com.hcl.systembackend.entity.Transaction;
@@ -9,15 +11,25 @@ import com.hcl.systembackend.repository.AccountRepository;
 import com.hcl.systembackend.repository.CustomerRepository;
 import com.hcl.systembackend.repository.FraudTransactionRepository;
 import com.hcl.systembackend.repository.TransactionRepository;
+import com.hcl.systembackend.service.MockBankAdminAuthClient;
+import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
+import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Import;
+import org.springframework.context.annotation.Primary;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.web.server.ResponseStatusException;
 
 import java.sql.Timestamp;
 import java.time.LocalDateTime;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -27,6 +39,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 
 @SpringBootTest
 @AutoConfigureMockMvc
+@Import(SystemBackendApplicationTests.MockBankAdminAuthClientTestConfig.class)
 class SystemBackendApplicationTests {
     @Autowired
     private MockMvc mockMvc;
@@ -43,12 +56,16 @@ class SystemBackendApplicationTests {
     @Autowired
     private FraudTransactionRepository fraudTransactionRepository;
 
+        @Autowired
+        private StubMockBankAdminAuthClient mockBankAdminAuthClient;
+
     @Test
     void contextLoads() {
     }
 
     @Test
     void adminCanAuthenticateFetchHistoryAndPersistFlaggedAnomaly() throws Exception {
+        mockBankAdminAuthClient.reset();
         fraudTransactionRepository.deleteAll();
         transactionRepository.deleteAll();
         accountRepository.deleteAll();
@@ -118,5 +135,50 @@ class SystemBackendApplicationTests {
                 .andExpect(jsonPath("$[0].flaggedFraud").value(true));
 
         assertThat(fraudTransactionRepository.findByTransactionId(anomalousTxn.getId())).isPresent();
+    }
+
+    @TestConfiguration
+    static class MockBankAdminAuthClientTestConfig {
+        @Bean
+        @Primary
+        StubMockBankAdminAuthClient stubMockBankAdminAuthClient() {
+            return new StubMockBankAdminAuthClient();
+        }
+    }
+
+    static class StubMockBankAdminAuthClient implements MockBankAdminAuthClient {
+        private final Map<String, RegisteredAdmin> admins = new ConcurrentHashMap<>();
+
+        @Override
+        public String registerAdmin(SignupRequest request) {
+            String normalizedEmail = normalizeEmail(request.email());
+            if (admins.containsKey(normalizedEmail)) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "User already exists");
+            }
+
+            admins.put(normalizedEmail, new RegisteredAdmin(request.name().trim(), normalizedEmail, request.password()));
+            return "Admin Signup successful";
+        }
+
+        @Override
+        public DelegatedAdminProfile authenticateAdmin(SigninRequest request) {
+            String normalizedEmail = normalizeEmail(request.email());
+            RegisteredAdmin admin = admins.get(normalizedEmail);
+            if (admin == null || !admin.password().equals(request.password())) {
+                throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid admin credentials");
+            }
+            return new DelegatedAdminProfile(admin.email(), admin.name());
+        }
+
+        void reset() {
+            admins.clear();
+        }
+
+        private String normalizeEmail(String email) {
+            return email == null ? null : email.trim().toLowerCase();
+        }
+    }
+
+    private record RegisteredAdmin(String name, String email, String password) {
     }
 }
