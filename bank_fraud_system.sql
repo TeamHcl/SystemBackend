@@ -5,8 +5,9 @@
 -- Run these statements from psql if the database does not exist yet:
 -- CREATE DATABASE fraud_detection_system;
 -- \c fraud_detection_system
+CREATE EXTENSION IF NOT EXISTS vector;
 
-CREATE TYPE transaction_type_enum AS ENUM ('DEPOSIT', 'WITHDRAW', 'TRANSFER');
+CREATE TYPE transaction_type_enum AS ENUM ('DEPOSIT', 'WITHDRAWAL', 'TRANSFER', 'PAYMENT', 'OTHER');
 
 -- ============================================
 -- ADMIN TABLE
