@@ -8,14 +8,19 @@ import java.time.LocalDateTime;
 public class Transaction {
     @Id
     @GeneratedValue(strategy = GenerationType.IDENTITY)
+    @Column(name = "transaction_id")
     private Long id;
 
+    @Column(name = "account_id")
     private Long accountId;
+
     private Double amount;
 
     @Enumerated(EnumType.STRING)
+    @Column(name = "transaction_type")
     private TransactionType transactionType;
 
+    @Column(name = "transaction_time")
     private LocalDateTime transactionTime;
 
     public Transaction() {}

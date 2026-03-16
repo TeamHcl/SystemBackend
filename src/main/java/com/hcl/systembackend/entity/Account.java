@@ -12,11 +12,15 @@ public class Account {
     @Column(name = "customer_id")
     private Integer customerId;
 
-    @Column(name = "user_id")
+    @Transient
     private Long userId;
 
+    @Column(name = "account_number")
     private String accountNumber;
+
+    @Column(name = "account_type")
     private String accountType;
+
     private Double balance;
 
     public Long getAccountId() { return accountId; }
