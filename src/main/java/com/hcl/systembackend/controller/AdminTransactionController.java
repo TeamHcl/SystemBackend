@@ -1,5 +1,6 @@
 package com.hcl.systembackend.controller;
 
+import com.hcl.systembackend.dto.AdminTransactionHistoryItem;
 import com.hcl.systembackend.entity.Transaction;
 import com.hcl.systembackend.service.AdminTransactionService;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,8 +22,8 @@ public class AdminTransactionController {
     }
 
     @GetMapping("/transactions")
-    public ResponseEntity<List<Transaction>> getAllTransactions() {
-        List<Transaction> transactions = adminTransactionService.getAllTransactions();
+    public ResponseEntity<List<AdminTransactionHistoryItem>> getAllTransactions() {
+        List<AdminTransactionHistoryItem> transactions = adminTransactionService.getAllTransactions();
         return ResponseEntity.ok(transactions);
     }
 
