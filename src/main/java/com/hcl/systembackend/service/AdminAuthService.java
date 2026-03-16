@@ -1,6 +1,7 @@
 package com.hcl.systembackend.service;
 
 import com.hcl.systembackend.dto.AuthResponse;
+import com.hcl.systembackend.dto.DelegatedAdminProfile;
 import com.hcl.systembackend.dto.SigninRequest;
 import com.hcl.systembackend.dto.SignupRequest;
 import com.hcl.systembackend.entity.Admin;
@@ -13,6 +14,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.sql.Timestamp;
 import java.time.Instant;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -22,36 +24,28 @@ public class AdminAuthService {
 
     private final AdminRepository adminRepository;
     private final PasswordService passwordService;
+    private final MockBankAdminAuthClient mockBankAdminAuthClient;
     private final Map<String, Integer> activeTokens = new ConcurrentHashMap<>();
 
-    public AdminAuthService(AdminRepository adminRepository, PasswordService passwordService) {
+    public AdminAuthService(
+            AdminRepository adminRepository,
+            PasswordService passwordService,
+            MockBankAdminAuthClient mockBankAdminAuthClient
+    ) {
         this.adminRepository = adminRepository;
         this.passwordService = passwordService;
+        this.mockBankAdminAuthClient = mockBankAdminAuthClient;
     }
 
     public String registerAdmin(SignupRequest request) {
         validateSignup(request);
-        adminRepository.findByEmailIgnoreCase(request.email()).ifPresent(existing -> {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Admin email is already registered");
-        });
-
-        Admin admin = new Admin();
-        admin.setName(request.name().trim());
-        admin.setEmail(request.email().trim().toLowerCase());
-        admin.setPassword(passwordService.hash(request.password()));
-        admin.setCreatedAt(Timestamp.from(Instant.now()));
-        adminRepository.save(admin);
-        return "Admin registered successfully";
+        return mockBankAdminAuthClient.registerAdmin(request);
     }
 
     public AuthResponse login(SigninRequest request) {
         validateSignin(request);
-        Admin admin = adminRepository.findByEmailIgnoreCase(request.email().trim())
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid admin credentials"));
-
-        if (!passwordService.matches(request.password(), admin.getPassword())) {
-            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid admin credentials");
-        }
+        DelegatedAdminProfile delegatedAdmin = mockBankAdminAuthClient.authenticateAdmin(request);
+        Admin admin = syncShadowAdmin(delegatedAdmin);
 
         String token = UUID.randomUUID().toString();
         activeTokens.put(token, admin.getAdminId());
@@ -78,6 +72,47 @@ public class AdminAuthService {
             return null;
         }
         return header.substring(BEARER_PREFIX.length()).trim();
+    }
+
+    private Admin syncShadowAdmin(DelegatedAdminProfile delegatedAdmin) {
+        String normalizedEmail = delegatedAdmin.email().trim().toLowerCase();
+        String displayName = isBlank(delegatedAdmin.name()) ? normalizedEmail : delegatedAdmin.name().trim();
+
+        return adminRepository.findByEmailIgnoreCase(normalizedEmail)
+                .map(existingAdmin -> updateShadowAdmin(existingAdmin, normalizedEmail, displayName))
+                .orElseGet(() -> createShadowAdmin(normalizedEmail, displayName));
+    }
+
+    private Admin updateShadowAdmin(Admin admin, String normalizedEmail, String displayName) {
+        boolean requiresSave = false;
+
+        if (!Objects.equals(admin.getName(), displayName)) {
+            admin.setName(displayName);
+            requiresSave = true;
+        }
+        if (!normalizedEmail.equalsIgnoreCase(admin.getEmail())) {
+            admin.setEmail(normalizedEmail);
+            requiresSave = true;
+        }
+        if (isBlank(admin.getPassword())) {
+            admin.setPassword(passwordService.hash(UUID.randomUUID().toString()));
+            requiresSave = true;
+        }
+        if (admin.getCreatedAt() == null) {
+            admin.setCreatedAt(Timestamp.from(Instant.now()));
+            requiresSave = true;
+        }
+
+        return requiresSave ? adminRepository.save(admin) : admin;
+    }
+
+    private Admin createShadowAdmin(String normalizedEmail, String displayName) {
+        Admin admin = new Admin();
+        admin.setName(displayName);
+        admin.setEmail(normalizedEmail);
+        admin.setPassword(passwordService.hash(UUID.randomUUID().toString()));
+        admin.setCreatedAt(Timestamp.from(Instant.now()));
+        return adminRepository.save(admin);
     }
 
     private void validateSignup(SignupRequest request) {
