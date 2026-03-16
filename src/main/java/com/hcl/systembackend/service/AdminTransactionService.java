@@ -3,8 +3,10 @@ package com.hcl.systembackend.service;
 import com.hcl.systembackend.dto.AdminTransactionHistoryItem;
 import com.hcl.systembackend.dto.TransactionRiskMetrics;
 import com.hcl.systembackend.entity.Account;
+import com.hcl.systembackend.entity.FraudTransaction;
 import com.hcl.systembackend.entity.Transaction;
 import com.hcl.systembackend.repository.AccountRepository;
+import com.hcl.systembackend.repository.FraudTransactionRepository;
 import com.hcl.systembackend.repository.TransactionRepository;
 import org.springframework.dao.DataAccessException;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -122,6 +124,7 @@ public class AdminTransactionService {
 
     private final TransactionRepository transactionRepository;
     private final AccountRepository accountRepository;
+    private final FraudTransactionRepository fraudTransactionRepository;
     private final JdbcTemplate jdbcTemplate;
     private final DataSource dataSource;
 
@@ -129,24 +132,33 @@ public class AdminTransactionService {
     public AdminTransactionService(
             TransactionRepository transactionRepository,
             AccountRepository accountRepository,
+            FraudTransactionRepository fraudTransactionRepository,
             JdbcTemplate jdbcTemplate,
             DataSource dataSource
     ) {
         this.transactionRepository = transactionRepository;
         this.accountRepository = accountRepository;
+        this.fraudTransactionRepository = fraudTransactionRepository;
         this.jdbcTemplate = jdbcTemplate;
         this.dataSource = dataSource;
     }
 
     public List<AdminTransactionHistoryItem> getAllTransactions() {
+        List<AdminTransactionHistoryItem> history;
         if (isPostgreSql()) {
             try {
-                return getTransactionsWithPgvector();
+                history = getTransactionsWithPgvector();
+                persistFlaggedTransactions(history);
+                return history;
             } catch (DataAccessException ex) {
-                return getTransactionsWithFallbackScoring();
+                history = getTransactionsWithFallbackScoring();
+                persistFlaggedTransactions(history);
+                return history;
             }
         }
-        return getTransactionsWithFallbackScoring();
+        history = getTransactionsWithFallbackScoring();
+        persistFlaggedTransactions(history);
+        return history;
     }
 
     public List<Transaction> getRawTransactions() {
@@ -262,6 +274,31 @@ public class AdminTransactionService {
             return number.intValue();
         }
         return Integer.valueOf(value.toString());
+    }
+
+    private void persistFlaggedTransactions(List<AdminTransactionHistoryItem> history) {
+        history.stream()
+                .filter(AdminTransactionHistoryItem::flaggedFraud)
+                .filter(item -> !fraudTransactionRepository.existsByTransactionId(item.transactionId()))
+                .map(this::toFraudTransaction)
+                .forEach(fraudTransactionRepository::save);
+    }
+
+    private FraudTransaction toFraudTransaction(AdminTransactionHistoryItem item) {
+        FraudTransaction fraudTransaction = new FraudTransaction();
+        fraudTransaction.setTransactionId(item.transactionId());
+        fraudTransaction.setFraudType(resolveFraudType(item));
+        fraudTransaction.setFraudReason(item.fraudReason());
+        fraudTransaction.setRiskScore((int) Math.round(item.anomalyScore()));
+        fraudTransaction.setDetectedAt(LocalDateTime.now());
+        return fraudTransaction;
+    }
+
+    private String resolveFraudType(AdminTransactionHistoryItem item) {
+        if (item.anomalyScore() >= 50.0) {
+            return "ANOMALOUS_TRANSACTION";
+        }
+        return "SUSPICIOUS_PATTERN";
     }
 }
 
