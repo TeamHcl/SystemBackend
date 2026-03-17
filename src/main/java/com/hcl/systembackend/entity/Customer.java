@@ -11,6 +11,9 @@ public class Customer {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Integer customerId;
 
+    @Column(name = "source_user_id", unique = true)
+    private Long sourceUserId;
+
     private String name;
     private String email;
     private String phone;
@@ -26,6 +29,14 @@ public class Customer {
 
     public void setCustomerId(Integer customerId) {
         this.customerId = customerId;
+    }
+
+    public Long getSourceUserId() {
+        return sourceUserId;
+    }
+
+    public void setSourceUserId(Long sourceUserId) {
+        this.sourceUserId = sourceUserId;
     }
 
     public String getName() {
