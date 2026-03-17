@@ -3,6 +3,7 @@ package com.hcl.systembackend.service;
 import com.hcl.systembackend.dto.AnomalySummary;
 import com.hcl.systembackend.dto.AdminTransactionHistoryItem;
 import com.hcl.systembackend.dto.InvestigationQueueItemView;
+import com.hcl.systembackend.dto.InvestigationQueueStatusUpdateRequest;
 import com.hcl.systembackend.dto.TransactionRiskMetrics;
 import com.hcl.systembackend.entity.Account;
 import com.hcl.systembackend.entity.AnomalyInvestigationQueue;
@@ -15,7 +16,9 @@ import com.hcl.systembackend.repository.TransactionRepository;
 import org.springframework.dao.DataAccessException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
 
 import javax.sql.DataSource;
 import java.sql.Connection;
@@ -27,10 +30,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 @Service
 public class AdminTransactionService {
+    private static final Set<String> ALLOWED_QUEUE_STATUSES = Set.of("NEW", "IN_REVIEW", "RESOLVED");
+
     private static final String PGVECTOR_HISTORY_SQL = """
             WITH feature_rows AS (
                 SELECT
@@ -132,6 +138,7 @@ public class AdminTransactionService {
     private final FraudTransactionRepository fraudTransactionRepository;
     private final AnomalyInvestigationQueueRepository anomalyInvestigationQueueRepository;
     private final TransactionGraphRiskService transactionGraphRiskService;
+    private final AdminActivityLogService adminActivityLogService;
     private final JdbcTemplate jdbcTemplate;
     private final DataSource dataSource;
 
@@ -142,6 +149,7 @@ public class AdminTransactionService {
             FraudTransactionRepository fraudTransactionRepository,
             AnomalyInvestigationQueueRepository anomalyInvestigationQueueRepository,
             TransactionGraphRiskService transactionGraphRiskService,
+                AdminActivityLogService adminActivityLogService,
             JdbcTemplate jdbcTemplate,
             DataSource dataSource
     ) {
@@ -150,6 +158,7 @@ public class AdminTransactionService {
         this.fraudTransactionRepository = fraudTransactionRepository;
         this.anomalyInvestigationQueueRepository = anomalyInvestigationQueueRepository;
         this.transactionGraphRiskService = transactionGraphRiskService;
+        this.adminActivityLogService = adminActivityLogService;
         this.jdbcTemplate = jdbcTemplate;
         this.dataSource = dataSource;
     }
@@ -199,9 +208,50 @@ public class AdminTransactionService {
                 .filter(Objects::nonNull)
                 .distinct()
                 .count();
-        long openQueueItems = anomalyInvestigationQueueRepository.countByStatusIgnoreCase("NEW");
+        long openQueueItems = anomalyInvestigationQueueRepository.countByStatusIgnoreCase("NEW")
+            + anomalyInvestigationQueueRepository.countByStatusIgnoreCase("IN_REVIEW");
         return new AnomalySummary(history.size(), flaggedTransactions, flaggedUsers, openQueueItems);
     }
+
+        public InvestigationQueueItemView updateInvestigationQueueStatus(
+            Long queueId,
+            InvestigationQueueStatusUpdateRequest updateRequest,
+            Integer adminId
+        ) {
+        if (queueId == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Queue id is required");
+        }
+
+        String normalizedStatus = normalizeStatus(updateRequest == null ? null : updateRequest.status());
+        AnomalyInvestigationQueue queueItem = anomalyInvestigationQueueRepository.findById(queueId)
+            .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Investigation queue item not found"));
+
+        String oldStatus = queueItem.getStatus();
+        queueItem.setStatus(normalizedStatus);
+        queueItem.setUpdatedAt(LocalDateTime.now());
+        AnomalyInvestigationQueue saved = anomalyInvestigationQueueRepository.save(queueItem);
+
+        String note = updateRequest == null ? null : updateRequest.note();
+        adminActivityLogService.record(
+            adminId,
+            "UPDATE_INVESTIGATION_STATUS",
+            "queueId=" + saved.getQueueId()
+                + ", transactionId=" + saved.getTransactionId()
+                + ", from=" + (oldStatus == null ? "UNKNOWN" : oldStatus)
+                + ", to=" + normalizedStatus
+                + (note == null || note.isBlank() ? "" : ", note=" + note.trim())
+        );
+
+        return new InvestigationQueueItemView(
+            saved.getQueueId(),
+            saved.getTransactionId(),
+            saved.getCustomerId(),
+            saved.getRiskScore(),
+            saved.getReason(),
+            saved.getStatus(),
+            saved.getCreatedAt()
+        );
+        }
 
     private boolean isPostgreSql() {
         try (Connection connection = dataSource.getConnection()) {
@@ -277,10 +327,11 @@ public class AdminTransactionService {
             return new TransactionRiskMetrics(1.0, 0.0, false, "no prior customer history available");
         }
 
+        double currentAmount = transaction.getAmount() == null ? 0.0 : transaction.getAmount();
         double averageAmount = history.stream()
                 .mapToDouble(Transaction::getAmount)
                 .average()
-                .orElse(transaction.getAmount());
+                .orElse(currentAmount);
         long matchingTypes = history.stream()
                 .filter(item -> item.getTransactionType() == transaction.getTransactionType())
                 .count();
@@ -290,16 +341,35 @@ public class AdminTransactionService {
         double gapDays = Math.max(0.0, Duration.between(previousTime, transaction.getTransactionTime()).toHours() / 24.0);
         double amountDeviation = averageAmount == 0.0
                 ? 0.0
-                : Math.abs(transaction.getAmount() - averageAmount) / averageAmount;
+                : Math.abs(currentAmount - averageAmount) / averageAmount;
+        double normalizedAmountDeviation = Math.min(amountDeviation / 4.0, 1.0);
         double normalizedGap = Math.min(gapDays / 30.0, 1.0);
 
-        double anomalyScore = Math.min(100.0, ((amountDeviation * 0.55) + ((1 - typeMatchRatio) * 0.30) + (normalizedGap * 0.15)) * 100.0);
+        double anomalyScore = Math.min(
+                100.0,
+                ((normalizedAmountDeviation * 0.50) + ((1 - typeMatchRatio) * 0.30) + (normalizedGap * 0.20)) * 100.0
+        );
         double similarityScore = Math.max(0.0, 1.0 - (anomalyScore / 100.0));
-        boolean flagged = similarityScore < 0.82 || transaction.getAmount() >= averageAmount * 2.5;
+        double amountMultiplier = averageAmount == 0.0 ? 1.0 : currentAmount / averageAmount;
+        boolean sparseHistory = history.size() < 3;
 
-        String reason = flagged
-                ? "fallback fraud score flagged this transaction as abnormal for the customer"
-                : "fallback fraud score considered this transaction normal";
+        boolean highAmountOutlier = amountMultiplier >= (sparseHistory ? 5.0 : 3.5);
+        boolean highScoreOutlier = anomalyScore >= (sparseHistory ? 70.0 : 55.0);
+        boolean absoluteAmountRisk = currentAmount >= 250000.0;
+        boolean flagged = highAmountOutlier || highScoreOutlier || absoluteAmountRisk;
+
+        String reason;
+        if (flagged) {
+            if (absoluteAmountRisk) {
+                reason = "very large absolute transaction amount";
+            } else if (highAmountOutlier) {
+                reason = "transaction amount is unusually high for this customer baseline";
+            } else {
+                reason = "fallback fraud score flagged this transaction as abnormal for the customer";
+            }
+        } else {
+            reason = "fallback fraud score considered this transaction normal";
+        }
 
         return new TransactionRiskMetrics(similarityScore, anomalyScore, flagged, reason);
     }
@@ -403,6 +473,21 @@ public class AdminTransactionService {
             return "ANOMALOUS_TRANSACTION";
         }
         return "SUSPICIOUS_PATTERN";
+    }
+
+    private String normalizeStatus(String status) {
+        if (status == null || status.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Status is required");
+        }
+
+        String normalized = status.trim().toUpperCase();
+        if (!ALLOWED_QUEUE_STATUSES.contains(normalized)) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "Status should be one of: NEW, IN_REVIEW, RESOLVED"
+            );
+        }
+        return normalized;
     }
 }
 

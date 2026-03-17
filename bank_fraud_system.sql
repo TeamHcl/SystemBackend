@@ -131,6 +131,16 @@ CREATE TABLE anomaly_investigation_queue (
         FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
 );
 
+    CREATE TABLE admin_activity_logs (
+        log_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        admin_id INT,
+        action VARCHAR(120) NOT NULL,
+        details TEXT,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        CONSTRAINT fk_admin_activity_admin
+        FOREIGN KEY (admin_id) REFERENCES admin(admin_id)
+    );
+
 -- ============================================
 -- FRAUD INVESTIGATION
 -- ============================================
