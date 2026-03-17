@@ -9,6 +9,9 @@ public class Account {
     @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long accountId;
 
+    @Column(name = "source_account_id", unique = true)
+    private Long sourceAccountId;
+
     @Column(name = "customer_id")
     private Integer customerId;
 
@@ -25,6 +28,8 @@ public class Account {
 
     public Long getAccountId() { return accountId; }
     public void setAccountId(Long accountId) { this.accountId = accountId; }
+    public Long getSourceAccountId() { return sourceAccountId; }
+    public void setSourceAccountId(Long sourceAccountId) { this.sourceAccountId = sourceAccountId; }
     public Integer getCustomerId() { return customerId; }
     public void setCustomerId(Integer customerId) { this.customerId = customerId; }
     public Long getUserId() { return userId; }
