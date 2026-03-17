@@ -2,6 +2,7 @@ package com.hcl.systembackend.controller;
 
 import com.hcl.systembackend.dto.AnomalySummary;
 import com.hcl.systembackend.dto.AdminTransactionHistoryItem;
+import com.hcl.systembackend.dto.InvestigationQueueStatusUpdateRequest;
 import com.hcl.systembackend.dto.InvestigationQueueItemView;
 import com.hcl.systembackend.entity.Transaction;
 import com.hcl.systembackend.service.AdminAuthService;
@@ -10,6 +11,9 @@ import jakarta.servlet.http.HttpServletRequest;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -51,6 +55,16 @@ public class AdminTransactionController {
     public ResponseEntity<AnomalySummary> getAnomalySummary(HttpServletRequest request) {
         adminAuthService.requireAdminId(request);
         return ResponseEntity.ok(adminTransactionService.getAnomalySummary());
+    }
+
+    @PatchMapping("/investigation-queue/{queueId}/status")
+    public ResponseEntity<InvestigationQueueItemView> updateInvestigationQueueStatus(
+            HttpServletRequest request,
+            @PathVariable Long queueId,
+            @RequestBody InvestigationQueueStatusUpdateRequest updateRequest
+    ) {
+        Integer adminId = adminAuthService.requireAdminId(request);
+        return ResponseEntity.ok(adminTransactionService.updateInvestigationQueueStatus(queueId, updateRequest, adminId));
     }
 }
 

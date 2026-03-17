@@ -1,9 +1,11 @@
 package com.hcl.systembackend.controller;
 
+import com.hcl.systembackend.dto.AdminActivityLogItem;
 import com.hcl.systembackend.dto.AnomalousUserView;
 import com.hcl.systembackend.dto.AdminUserView;
 import com.hcl.systembackend.dto.MockBankHistorySyncResult;
 import com.hcl.systembackend.dto.SignupRequest;
+import com.hcl.systembackend.service.AdminActivityLogService;
 import com.hcl.systembackend.service.AdminAuthService;
 import com.hcl.systembackend.service.AdminUserService;
 import com.hcl.systembackend.service.MockBankHistorySyncService;
@@ -26,15 +28,18 @@ public class AdminController {
     private final AdminAuthService adminAuthService;
     private final AdminUserService adminUserService;
     private final MockBankHistorySyncService mockBankHistorySyncService;
+    private final AdminActivityLogService adminActivityLogService;
 
     public AdminController(
             AdminAuthService adminAuthService,
             AdminUserService adminUserService,
-            MockBankHistorySyncService mockBankHistorySyncService
+            MockBankHistorySyncService mockBankHistorySyncService,
+            AdminActivityLogService adminActivityLogService
     ) {
         this.adminAuthService = adminAuthService;
         this.adminUserService = adminUserService;
         this.mockBankHistorySyncService = mockBankHistorySyncService;
+        this.adminActivityLogService = adminActivityLogService;
     }
 
     @PostMapping("/register")
@@ -61,7 +66,27 @@ public class AdminController {
             @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME)
             LocalDateTime since
     ) {
+        Integer adminId = adminAuthService.requireAdminId(request);
+        String delegatedMockBankToken = adminAuthService.getDelegatedMockBankToken(request);
+        MockBankHistorySyncResult result = mockBankHistorySyncService.syncHistory(since, delegatedMockBankToken);
+        adminActivityLogService.record(
+            adminId,
+            "SYNC_MOCKBANK_HISTORY",
+            "users=" + result.usersSynced()
+                + ", accounts=" + result.accountsSynced()
+                + ", inserted=" + result.transactionsInserted()
+                + ", updated=" + result.transactionsUpdated()
+                + ", skipped=" + result.transactionsSkipped()
+        );
+        return ResponseEntity.ok(result);
+        }
+
+        @GetMapping("/activity-logs")
+        public ResponseEntity<List<AdminActivityLogItem>> getActivityLogs(
+            HttpServletRequest request,
+            @RequestParam(defaultValue = "100") int limit
+        ) {
         adminAuthService.requireAdminId(request);
-        return ResponseEntity.ok(mockBankHistorySyncService.syncHistory(since));
+        return ResponseEntity.ok(adminActivityLogService.getRecent(limit));
     }
 }

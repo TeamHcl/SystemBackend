@@ -25,21 +25,26 @@ public class AdminAuthService {
     private final AdminRepository adminRepository;
     private final PasswordService passwordService;
     private final MockBankAdminAuthClient mockBankAdminAuthClient;
-    private final Map<String, Integer> activeTokens = new ConcurrentHashMap<>();
+    private final AdminActivityLogService adminActivityLogService;
+    private final Map<String, AdminSession> activeTokens = new ConcurrentHashMap<>();
 
     public AdminAuthService(
             AdminRepository adminRepository,
             PasswordService passwordService,
-            MockBankAdminAuthClient mockBankAdminAuthClient
+            MockBankAdminAuthClient mockBankAdminAuthClient,
+            AdminActivityLogService adminActivityLogService
     ) {
         this.adminRepository = adminRepository;
         this.passwordService = passwordService;
         this.mockBankAdminAuthClient = mockBankAdminAuthClient;
+        this.adminActivityLogService = adminActivityLogService;
     }
 
     public String registerAdmin(SignupRequest request) {
         validateSignup(request);
-        return mockBankAdminAuthClient.registerAdmin(request);
+        String result = mockBankAdminAuthClient.registerAdmin(request);
+        syncShadowAdmin(new DelegatedAdminProfile(request.email(), request.name()));
+        return result;
     }
 
     public AuthResponse login(SigninRequest request) {
@@ -48,7 +53,8 @@ public class AdminAuthService {
         Admin admin = syncShadowAdmin(delegatedAdmin);
 
         String token = UUID.randomUUID().toString();
-        activeTokens.put(token, admin.getAdminId());
+        activeTokens.put(token, new AdminSession(admin.getAdminId(), delegatedAdmin.delegatedToken()));
+        adminActivityLogService.record(admin.getAdminId(), "ADMIN_LOGIN", "Admin authenticated using delegated MockBank credentials");
         return new AuthResponse(token, "Admin authenticated successfully");
     }
 
@@ -58,12 +64,16 @@ public class AdminAuthService {
     }
 
     public Integer requireAdminId(HttpServletRequest request) {
-        String token = extractBearerToken(request);
-        Integer adminId = token == null ? null : activeTokens.get(token);
-        if (adminId == null) {
+        AdminSession session = requireAdminSession(request);
+        if (session == null || session.adminId() == null) {
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Valid admin bearer token is required");
         }
-        return adminId;
+        return session.adminId();
+    }
+
+    public String getDelegatedMockBankToken(HttpServletRequest request) {
+        AdminSession session = requireAdminSession(request);
+        return session.delegatedMockBankToken();
     }
 
     private String extractBearerToken(HttpServletRequest request) {
@@ -72,6 +82,15 @@ public class AdminAuthService {
             return null;
         }
         return header.substring(BEARER_PREFIX.length()).trim();
+    }
+
+    private AdminSession requireAdminSession(HttpServletRequest request) {
+        String token = extractBearerToken(request);
+        AdminSession session = token == null ? null : activeTokens.get(token);
+        if (session == null) {
+            throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Valid admin bearer token is required");
+        }
+        return session;
     }
 
     private Admin syncShadowAdmin(DelegatedAdminProfile delegatedAdmin) {
@@ -129,5 +148,11 @@ public class AdminAuthService {
 
     private boolean isBlank(String value) {
         return value == null || value.isBlank();
+    }
+
+    private record AdminSession(
+            Integer adminId,
+            String delegatedMockBankToken
+    ) {
     }
 }
