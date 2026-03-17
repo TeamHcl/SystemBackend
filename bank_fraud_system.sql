@@ -40,6 +40,7 @@ CREATE TABLE employees (
 
 CREATE TABLE customers (
     customer_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_user_id BIGINT UNIQUE,
     name VARCHAR(100) NOT NULL,
     email VARCHAR(120),
     phone VARCHAR(15),
@@ -67,6 +68,7 @@ CREATE TABLE auditors (
 
 CREATE TABLE accounts (
     account_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_account_id BIGINT UNIQUE,
     customer_id INT,
     account_number VARCHAR(20) UNIQUE,
     account_type VARCHAR(50),
@@ -82,14 +84,19 @@ CREATE TABLE accounts (
 
 CREATE TABLE transactions (
     transaction_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    source_transaction_id BIGINT UNIQUE,
     account_id INT,
+    counterparty_account_id INT,
     transaction_type transaction_type_enum NOT NULL,
     amount DECIMAL(15,2),
+    channel VARCHAR(30),
     transaction_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     initiated_by INT,
     status VARCHAR(50),
     CONSTRAINT fk_transactions_account
         FOREIGN KEY (account_id) REFERENCES accounts(account_id),
+    CONSTRAINT fk_transactions_counterparty
+        FOREIGN KEY (counterparty_account_id) REFERENCES accounts(account_id),
     CONSTRAINT fk_transactions_employee
         FOREIGN KEY (initiated_by) REFERENCES employees(employee_id)
 );
@@ -107,6 +114,21 @@ CREATE TABLE fraud_transactions (
     detected_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     CONSTRAINT fk_fraud_transaction
         FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id)
+);
+
+CREATE TABLE anomaly_investigation_queue (
+    queue_id INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    transaction_id INT UNIQUE,
+    customer_id INT,
+    risk_score INT,
+    reason TEXT,
+    status VARCHAR(30) DEFAULT 'NEW',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    CONSTRAINT fk_queue_transaction
+        FOREIGN KEY (transaction_id) REFERENCES transactions(transaction_id),
+    CONSTRAINT fk_queue_customer
+        FOREIGN KEY (customer_id) REFERENCES customers(customer_id)
 );
 
 -- ============================================

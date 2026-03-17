@@ -1,11 +1,15 @@
 package com.hcl.systembackend.service;
 
+import com.hcl.systembackend.dto.AnomalySummary;
 import com.hcl.systembackend.dto.AdminTransactionHistoryItem;
+import com.hcl.systembackend.dto.InvestigationQueueItemView;
 import com.hcl.systembackend.dto.TransactionRiskMetrics;
 import com.hcl.systembackend.entity.Account;
+import com.hcl.systembackend.entity.AnomalyInvestigationQueue;
 import com.hcl.systembackend.entity.FraudTransaction;
 import com.hcl.systembackend.entity.Transaction;
 import com.hcl.systembackend.repository.AccountRepository;
+import com.hcl.systembackend.repository.AnomalyInvestigationQueueRepository;
 import com.hcl.systembackend.repository.FraudTransactionRepository;
 import com.hcl.systembackend.repository.TransactionRepository;
 import org.springframework.dao.DataAccessException;
@@ -22,6 +26,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.stream.Collectors;
 
 @Service
@@ -125,6 +130,8 @@ public class AdminTransactionService {
     private final TransactionRepository transactionRepository;
     private final AccountRepository accountRepository;
     private final FraudTransactionRepository fraudTransactionRepository;
+    private final AnomalyInvestigationQueueRepository anomalyInvestigationQueueRepository;
+    private final TransactionGraphRiskService transactionGraphRiskService;
     private final JdbcTemplate jdbcTemplate;
     private final DataSource dataSource;
 
@@ -133,12 +140,16 @@ public class AdminTransactionService {
             TransactionRepository transactionRepository,
             AccountRepository accountRepository,
             FraudTransactionRepository fraudTransactionRepository,
+            AnomalyInvestigationQueueRepository anomalyInvestigationQueueRepository,
+            TransactionGraphRiskService transactionGraphRiskService,
             JdbcTemplate jdbcTemplate,
             DataSource dataSource
     ) {
         this.transactionRepository = transactionRepository;
         this.accountRepository = accountRepository;
         this.fraudTransactionRepository = fraudTransactionRepository;
+        this.anomalyInvestigationQueueRepository = anomalyInvestigationQueueRepository;
+        this.transactionGraphRiskService = transactionGraphRiskService;
         this.jdbcTemplate = jdbcTemplate;
         this.dataSource = dataSource;
     }
@@ -148,21 +159,48 @@ public class AdminTransactionService {
         if (isPostgreSql()) {
             try {
                 history = getTransactionsWithPgvector();
-                persistFlaggedTransactions(history);
-                return history;
             } catch (DataAccessException ex) {
                 history = getTransactionsWithFallbackScoring();
-                persistFlaggedTransactions(history);
-                return history;
             }
+        } else {
+            history = getTransactionsWithFallbackScoring();
         }
-        history = getTransactionsWithFallbackScoring();
-        persistFlaggedTransactions(history);
-        return history;
+
+        List<AdminTransactionHistoryItem> enrichedHistory = applyGraphRisk(history);
+        persistFlaggedTransactions(enrichedHistory);
+        persistQueueItems(enrichedHistory);
+        return enrichedHistory;
     }
 
     public List<Transaction> getRawTransactions() {
         return transactionRepository.findAllByOrderByTransactionTimeDesc();
+    }
+
+    public List<InvestigationQueueItemView> getInvestigationQueueItems() {
+        return anomalyInvestigationQueueRepository.findAllByOrderByCreatedAtDesc().stream()
+                .map(item -> new InvestigationQueueItemView(
+                        item.getQueueId(),
+                        item.getTransactionId(),
+                        item.getCustomerId(),
+                        item.getRiskScore(),
+                        item.getReason(),
+                        item.getStatus(),
+                        item.getCreatedAt()
+                ))
+                .toList();
+    }
+
+    public AnomalySummary getAnomalySummary() {
+        List<AdminTransactionHistoryItem> history = getAllTransactions();
+        int flaggedTransactions = (int) history.stream().filter(AdminTransactionHistoryItem::flaggedFraud).count();
+        int flaggedUsers = (int) history.stream()
+                .filter(AdminTransactionHistoryItem::flaggedFraud)
+                .map(AdminTransactionHistoryItem::customerId)
+                .filter(Objects::nonNull)
+                .distinct()
+                .count();
+        long openQueueItems = anomalyInvestigationQueueRepository.countByStatusIgnoreCase("NEW");
+        return new AnomalySummary(history.size(), flaggedTransactions, flaggedUsers, openQueueItems);
     }
 
     private boolean isPostgreSql() {
@@ -276,12 +314,66 @@ public class AdminTransactionService {
         return Integer.valueOf(value.toString());
     }
 
+    private List<AdminTransactionHistoryItem> applyGraphRisk(List<AdminTransactionHistoryItem> history) {
+        Map<Long, TransactionGraphRiskService.GraphRiskMetrics> graphMetricsByTransactionId = transactionGraphRiskService.scoreByTransactionId();
+
+        return history.stream()
+                .map(item -> mergeGraphRisk(item, graphMetricsByTransactionId.get(item.transactionId())))
+                .toList();
+    }
+
+    private AdminTransactionHistoryItem mergeGraphRisk(
+            AdminTransactionHistoryItem item,
+            TransactionGraphRiskService.GraphRiskMetrics graphMetrics
+    ) {
+        if (graphMetrics == null) {
+            return item;
+        }
+
+        double combinedAnomalyScore = round(Math.min(100.0, (item.anomalyScore() * 0.70) + (graphMetrics.score() * 0.30)));
+        boolean flaggedFraud = item.flaggedFraud() || graphMetrics.score() >= 55.0 || combinedAnomalyScore >= 60.0;
+
+        String fraudReason = item.fraudReason();
+        if (graphMetrics.score() >= 20.0) {
+            if (fraudReason == null || fraudReason.isBlank()) {
+                fraudReason = graphMetrics.reason();
+            } else if (!fraudReason.contains(graphMetrics.reason())) {
+                fraudReason = fraudReason + "; graph: " + graphMetrics.reason();
+            }
+        }
+
+        return new AdminTransactionHistoryItem(
+                item.transactionId(),
+                item.accountId(),
+                item.customerId(),
+                item.amount(),
+                item.transactionType(),
+                item.transactionTime(),
+                item.similarityScore(),
+                combinedAnomalyScore,
+                flaggedFraud,
+                fraudReason
+        );
+    }
+
+    private double round(double value) {
+        return Math.round(value * 100.0) / 100.0;
+    }
+
     private void persistFlaggedTransactions(List<AdminTransactionHistoryItem> history) {
         history.stream()
                 .filter(AdminTransactionHistoryItem::flaggedFraud)
                 .filter(item -> !fraudTransactionRepository.existsByTransactionId(item.transactionId()))
                 .map(this::toFraudTransaction)
                 .forEach(fraudTransactionRepository::save);
+    }
+
+    private void persistQueueItems(List<AdminTransactionHistoryItem> history) {
+        history.stream()
+                .filter(AdminTransactionHistoryItem::flaggedFraud)
+                .filter(item -> !anomalyInvestigationQueueRepository.existsByTransactionId(item.transactionId()))
+                .map(this::toQueueItem)
+                .forEach(anomalyInvestigationQueueRepository::save);
     }
 
     private FraudTransaction toFraudTransaction(AdminTransactionHistoryItem item) {
@@ -292,6 +384,18 @@ public class AdminTransactionService {
         fraudTransaction.setRiskScore((int) Math.round(item.anomalyScore()));
         fraudTransaction.setDetectedAt(LocalDateTime.now());
         return fraudTransaction;
+    }
+
+    private AnomalyInvestigationQueue toQueueItem(AdminTransactionHistoryItem item) {
+        AnomalyInvestigationQueue queueItem = new AnomalyInvestigationQueue();
+        queueItem.setTransactionId(item.transactionId());
+        queueItem.setCustomerId(item.customerId());
+        queueItem.setRiskScore((int) Math.round(item.anomalyScore()));
+        queueItem.setReason(item.fraudReason());
+        queueItem.setStatus("NEW");
+        queueItem.setCreatedAt(LocalDateTime.now());
+        queueItem.setUpdatedAt(LocalDateTime.now());
+        return queueItem;
     }
 
     private String resolveFraudType(AdminTransactionHistoryItem item) {
