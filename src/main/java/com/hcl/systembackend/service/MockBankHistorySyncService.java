@@ -62,7 +62,14 @@ public class MockBankHistorySyncService {
 
     @Transactional
     public MockBankHistorySyncResult syncHistory(LocalDateTime since) {
-        String adminToken = authenticateWithMockBank();
+        return syncHistory(since, null);
+    }
+
+    @Transactional
+    public MockBankHistorySyncResult syncHistory(LocalDateTime since, String delegatedAdminToken) {
+        String adminToken = isBlank(delegatedAdminToken)
+                ? authenticateWithMockBank()
+                : delegatedAdminToken.trim();
 
         List<RemoteUser> remoteUsers = fetchUsers(adminToken);
         SyncCustomerResult customerResult = upsertCustomers(remoteUsers);

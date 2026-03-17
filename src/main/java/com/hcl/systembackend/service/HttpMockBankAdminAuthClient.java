@@ -52,7 +52,11 @@ public class HttpMockBankAdminAuthClient implements MockBankAdminAuthClient {
                 throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "MockBank admin authentication failed");
             }
 
-            return new DelegatedAdminProfile(response.email().trim().toLowerCase(), response.name());
+            return new DelegatedAdminProfile(
+                    response.email().trim().toLowerCase(),
+                    response.name(),
+                    response.token()
+            );
         } catch (RestClientResponseException exception) {
             throw mapRemoteException(exception, "MockBank admin authentication failed");
         } catch (ResourceAccessException exception) {
